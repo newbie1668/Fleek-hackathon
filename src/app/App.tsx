@@ -1,5 +1,6 @@
 import { useState, useEffect, useReducer, useRef } from "react";
 import productImg from "@/imports/BuyerView/efd3b0e58fa883c7f5794b13db7b8b01e4dc22a7.png";
+import fleekLogo from "@/imports/Logo_fleek.png";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type AuctionStatus = "draft" | "live" | "closed";
@@ -11,14 +12,12 @@ type ActivityTab = "public" | "private";
 interface AuctionState {
   status: AuctionStatus;
   startPrice: number;
-  reservePrice: number;
   buyNowPrice: number;
   currentPrice: number;
   secondsRemaining: number;
   primaryMaximum: number | null;
   rivalMaximum: number | null;
   leader: Leader;
-  reserveMet: boolean;
   bidCount: number;
   closeReason: "auction" | "buy-now" | null;
   fulfilment: "Pending Fleek QC" | null;
@@ -29,14 +28,12 @@ interface AuctionState {
 const INITIAL_STATE: AuctionState = {
   status: "draft",
   startPrice: 520,
-  reservePrice: 620,
   buyNowPrice: 760,
   currentPrice: 520,
   secondsRemaining: 90,
   primaryMaximum: null,
   rivalMaximum: null,
   leader: "none",
-  reserveMet: false,
   bidCount: 0,
   closeReason: null,
   fulfilment: null,
@@ -48,20 +45,19 @@ const INITIAL_STATE: AuctionState = {
 function computePrice(
   primaryMax: number | null,
   rivalMax: number | null,
-  startPrice: number,
-  reservePrice: number
+  startPrice: number
 ): number {
   const INC = 10;
   const maxima = [primaryMax, rivalMax].filter((v): v is number => v !== null);
   if (maxima.length === 0) return startPrice;
-  if (maxima.length === 1) return maxima[0] >= reservePrice ? reservePrice : startPrice;
+  if (maxima.length === 1) return startPrice; // no competition — stay at start
   const [hi, lo] = [...maxima].sort((a, b) => b - a);
   return Math.max(Math.min(hi, lo + INC), startPrice);
 }
 
 // ─── Reducer ──────────────────────────────────────────────────────────────────
 type Action =
-  | { type: "PUBLISH"; start: number; reserve: number; buyNow: number }
+  | { type: "PUBLISH"; start: number; buyNow: number }
   | { type: "APPROVE_PRIMARY"; max: number }
   | { type: "RIVAL_BID"; rivalMax: number }
   | { type: "BUY_NOW" }
@@ -77,7 +73,6 @@ function reducer(s: AuctionState, a: Action): AuctionState {
         ...INITIAL_STATE,
         status: "live",
         startPrice: a.start,
-        reservePrice: a.reserve,
         buyNowPrice: a.buyNow,
         currentPrice: a.start,
         secondsRemaining: 90,
@@ -87,8 +82,7 @@ function reducer(s: AuctionState, a: Action): AuctionState {
     case "APPROVE_PRIMARY": {
       if (s.status !== "live") return s;
       if (s.primaryMaximum !== null && a.max <= s.primaryMaximum) return s;
-      const newPrice = computePrice(a.max, s.rivalMaximum, s.startPrice, s.reservePrice);
-      const reserveMet = newPrice >= s.reservePrice;
+      const newPrice = computePrice(a.max, s.rivalMaximum, s.startPrice);
       const leader: Leader =
         s.rivalMaximum === null ? "primary" : a.max > s.rivalMaximum ? "primary" : "rival";
       const pub = [...s.publicEvents];
@@ -96,13 +90,11 @@ function reducer(s: AuctionState, a: Action): AuctionState {
       priv.push(`Maximum approved · £${a.max}`);
       priv.push("Proxy agent activated");
       if (newPrice > s.currentPrice) pub.push(`Automatic bid · Current price £${newPrice}`);
-      if (reserveMet && !s.reserveMet) pub.push("Reserve met");
       priv.push(leader === "primary" ? "Proxy retained the lead" : "Proxy stopped · You've been outbid");
       return {
         ...s,
         primaryMaximum: a.max,
         currentPrice: newPrice,
-        reserveMet,
         leader,
         bidCount: s.bidCount + 1,
         publicEvents: pub,
@@ -112,21 +104,18 @@ function reducer(s: AuctionState, a: Action): AuctionState {
 
     case "RIVAL_BID": {
       if (s.status !== "live") return s;
-      const newPrice = computePrice(s.primaryMaximum, a.rivalMax, s.startPrice, s.reservePrice);
-      const reserveMet = newPrice >= s.reservePrice;
+      const newPrice = computePrice(s.primaryMaximum, a.rivalMax, s.startPrice);
       const leader: Leader =
         s.primaryMaximum === null ? "rival" : a.rivalMax > s.primaryMaximum ? "rival" : "primary";
       const pub = [...s.publicEvents];
       const priv = [...s.privateBuyerEvents];
       if (newPrice > s.currentPrice) pub.push(`Automatic bid · Current price £${newPrice}`);
-      if (reserveMet && !s.reserveMet) pub.push("Reserve met");
       if (s.primaryMaximum !== null)
         priv.push(leader === "primary" ? "Proxy retained the lead" : "Proxy stopped · You've been outbid");
       return {
         ...s,
         rivalMaximum: a.rivalMax,
         currentPrice: newPrice,
-        reserveMet,
         leader,
         bidCount: s.bidCount + 1,
         publicEvents: pub,
@@ -141,7 +130,6 @@ function reducer(s: AuctionState, a: Action): AuctionState {
         status: "closed",
         currentPrice: s.buyNowPrice,
         leader: "buy-now",
-        reserveMet: true,
         closeReason: "buy-now",
         fulfilment: "Pending Fleek QC",
         secondsRemaining: 0,
@@ -152,30 +140,27 @@ function reducer(s: AuctionState, a: Action): AuctionState {
     case "TICK":
       if (s.status !== "live") return s;
       if (s.secondsRemaining <= 1) {
-        const sold = s.reserveMet;
         return {
           ...s,
           status: "closed",
           secondsRemaining: 0,
           closeReason: "auction",
-          fulfilment: sold ? "Pending Fleek QC" : null,
-          publicEvents: [...s.publicEvents, sold ? "Auction sold" : "Auction ended · Reserve not met"],
+          fulfilment: "Pending Fleek QC",
+          publicEvents: [...s.publicEvents, "Auction sold"],
         };
       }
       return { ...s, secondsRemaining: s.secondsRemaining - 1 };
 
-    case "ADVANCE_CLOSE": {
+    case "ADVANCE_CLOSE":
       if (s.status !== "live") return s;
-      const sold = s.reserveMet;
       return {
         ...s,
         status: "closed",
         secondsRemaining: 0,
         closeReason: "auction",
-        fulfilment: sold ? "Pending Fleek QC" : null,
-        publicEvents: [...s.publicEvents, sold ? "Auction sold" : "Auction ended · Reserve not met"],
+        fulfilment: "Pending Fleek QC",
+        publicEvents: [...s.publicEvents, "Auction sold"],
       };
-    }
 
     case "REPLAY":
       return {
@@ -186,7 +171,6 @@ function reducer(s: AuctionState, a: Action): AuctionState {
         primaryMaximum: null,
         rivalMaximum: null,
         leader: "none",
-        reserveMet: false,
         bidCount: 0,
         closeReason: null,
         fulfilment: null,
@@ -248,17 +232,6 @@ function StatusBadge({ status }: { status: AuctionStatus }) {
   );
 }
 
-function ReserveBadge({ met }: { met: boolean }) {
-  return (
-    <span
-      className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
-        met ? "bg-[#dcfce7] text-[#15803d]" : "bg-[#fef3c7] text-[#92400e]"
-      }`}
-    >
-      {met ? "Reserve met" : "Reserve not met"}
-    </span>
-  );
-}
 
 function FulfilmentBadge() {
   return (
@@ -288,19 +261,13 @@ function formatCountdown(secs: number) {
 }
 
 // ─── FleekNav ─────────────────────────────────────────────────────────────────
-function FleekNav() {
+function FleekNav({ role, onRoleChange }: { role?: "seller" | "buyer"; onRoleChange?: (r: "seller" | "buyer") => void }) {
   return (
     <header className="bg-white border-b border-[#e5e7eb] sticky top-0 z-40">
       <div className="max-w-[1280px] mx-auto h-[60px] flex items-center gap-4 px-6">
         {/* Logo */}
-        <div className="flex items-center gap-1 shrink-0">
-          <span className="text-[#fdc700] text-[20px] leading-none">★</span>
-          <span
-            className="font-extrabold text-[20px] tracking-[2px] uppercase text-[#0c0c0f] leading-none"
-            style={{ fontFamily: "'Barlow Condensed', sans-serif" }}
-          >
-            FLEEK
-          </span>
+        <div className="flex items-center shrink-0">
+          <img src={fleekLogo} alt="Fleek" className="h-[26px] object-contain" />
         </div>
         {/* Nav */}
         <nav className="flex items-center gap-0.5">
@@ -356,12 +323,22 @@ function FleekNav() {
               2
             </span>
           </button>
-          <button className="bg-[#fdc700] text-[#0c0c0f] text-[13px] font-semibold font-['DM_Sans'] px-4 py-1.5 rounded-[10px]">
-            Sign Up
-          </button>
-          <button className="bg-[#0c0c0f] text-white text-[13px] font-semibold font-['DM_Sans'] px-4 py-1.5 rounded-[10px]">
-            Login
-          </button>
+          {/* Seller / Buyer toggle */}
+          {role !== undefined && onRoleChange && (
+            <div className="flex items-center bg-[#f3f4f6] rounded-[10px] p-[3px] ml-2">
+              {(["seller", "buyer"] as const).map((r) => (
+                <button
+                  key={r}
+                  onClick={() => onRoleChange(r)}
+                  className={`px-4 py-1.5 rounded-[8px] text-[13px] font-semibold font-['DM_Sans'] transition-all ${
+                    role === r ? "bg-[#0c0c0f] text-white shadow-sm" : "text-[#6d6c67] hover:text-[#151515]"
+                  }`}
+                >
+                  {r.charAt(0).toUpperCase() + r.slice(1)}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </header>
@@ -406,96 +383,165 @@ function PriceInput({ label, value, onChange, badge, error, disabled }: PriceInp
 }
 
 // ─── Price Range Bar ──────────────────────────────────────────────────────────
+// Shared helper: maps a value onto a 0–100% position within [lo, hi]
+function pct(value: number, lo: number, hi: number) {
+  if (hi <= lo) return 0;
+  return Math.min(100, Math.max(0, ((value - lo) / (hi - lo)) * 100));
+}
+
 function PriceRangeBar({
   startPrice,
-  reservePrice,
   buyNowPrice,
 }: {
   startPrice: number;
-  reservePrice: number;
   buyNowPrice: number;
 }) {
-  const max = buyNowPrice > 0 ? buyNowPrice : 1;
-  const startPct = Math.min((startPrice / max) * 100, 100);
-  const reservePct = Math.min((reservePrice / max) * 100, 100);
+  const hasValues = startPrice > 0 && buyNowPrice > 0;
 
   return (
     <div className="w-full pt-2 pb-6 relative select-none">
-      <div className="relative h-[6px] rounded-full bg-[#a2a2a2] mx-1">
-        {/* yellow fill from startBid to right */}
-        <div
-          className="absolute top-0 bottom-0 bg-[#fdc700] rounded-full"
-          style={{ left: `${startPct}%`, right: 0 }}
-        />
-        {/* startBid thumb (yellow border) */}
-        <div
-          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#fdc700] shadow-sm"
-          style={{ left: `${startPct}%` }}
-        />
-        {/* reserve thumb (orange border) */}
-        {reservePrice > 0 && reservePrice < buyNowPrice && (
-          <div
-            className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#ff5c00] shadow-sm"
-            style={{ left: `${reservePct}%` }}
-          />
+      {/* Track — grey until both prices entered, yellow once set */}
+      <div className={`relative h-[6px] rounded-full mx-2.5 ${hasValues ? "bg-[#fdc700]" : "bg-[#d1d5dc]"}`}>
+        {hasValues && (
+          <>
+            {/* startBid anchor — left */}
+            <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 left-0 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#fdc700] shadow-sm" />
+            {/* buyNow anchor — right */}
+            <div className="absolute top-1/2 -translate-y-1/2 translate-x-1/2 right-0 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#fdc700] shadow-sm" />
+          </>
         )}
-        {/* buyNow thumb (yellow border) */}
-        <div className="absolute top-1/2 -translate-y-1/2 translate-x-1/2 right-0 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#fdc700] shadow-sm" />
       </div>
       {/* Labels */}
       <div className="relative mt-2.5 h-5 text-[11px] font-['DM_Sans'] text-[#888896]">
-        <span className="absolute left-0">£0</span>
-        {startPrice > 0 && (
-          <span
-            className="absolute -translate-x-1/2"
-            style={{ left: `${startPct}%` }}
-          >
-            £{startPrice}
-          </span>
+        {hasValues ? (
+          <>
+            <span className="absolute left-0">£{startPrice}</span>
+            <span className="absolute right-0">£{buyNowPrice}</span>
+          </>
+        ) : (
+          <span className="text-[#99a1af]">Enter prices above to preview</span>
         )}
-        {reservePrice > 0 && reservePrice < buyNowPrice && (
-          <span
-            className="absolute -translate-x-1/2 text-[#ff5c00] font-semibold"
-            style={{ left: `${reservePct}%` }}
-          >
-            £{reservePrice}
-          </span>
-        )}
-        <span className="absolute right-0">£{buyNowPrice}</span>
       </div>
     </div>
   );
 }
 
+// ─── BidSlider ────────────────────────────────────────────────────────────────
+// Custom drag slider matching the seller price range bar.
+// Fixed anchors: startBid (left, yellow) · buyNow (right, yellow)
+// Draggable thumb: user's chosen maximum (dark border)
+function BidSlider({
+  startPrice,
+  buyNowPrice,
+  value,
+  onChange,
+  disabled,
+}: {
+  startPrice: number;
+  buyNowPrice: number;
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const lo = startPrice;
+  const hi = buyNowPrice - 10;
+  const valuePct = pct(value, lo, buyNowPrice);
+
+  function valueFromClientX(clientX: number) {
+    if (!trackRef.current) return value;
+    const rect = trackRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const raw = lo + ratio * (buyNowPrice - lo);
+    return Math.min(hi, Math.max(lo, Math.round(raw / 10) * 10));
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    if (disabled) return;
+    e.preventDefault();
+    dragging.current = true;
+    onChange(valueFromClientX(e.clientX));
+
+    function onMove(e: MouseEvent) {
+      if (dragging.current) onChange(valueFromClientX(e.clientX));
+    }
+    function onUp() {
+      dragging.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function handleTouchMove(e: React.TouchEvent) {
+    if (disabled) return;
+    onChange(valueFromClientX(e.touches[0].clientX));
+  }
+
+  return (
+    <div className={`w-full py-2 select-none ${disabled ? "opacity-50 pointer-events-none" : ""}`}>
+      {/* Track */}
+      <div
+        ref={trackRef}
+        className="relative h-[6px] rounded-full mx-2.5 cursor-pointer"
+        style={{ background: "#e5e7eb" }}
+        onMouseDown={handleMouseDown}
+        onTouchMove={handleTouchMove}
+      >
+        {/* Yellow fill from left to value thumb */}
+        <div
+          className="absolute top-0 bottom-0 bg-[#fdc700] rounded-full left-0 pointer-events-none"
+          style={{ width: `${valuePct}%` }}
+        />
+        {/* startBid anchor (left, yellow border) */}
+        <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 left-0 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#fdc700] shadow-sm pointer-events-none" />
+        {/* buyNow anchor (right, yellow border) */}
+        <div className="absolute top-1/2 -translate-y-1/2 translate-x-1/2 right-0 w-[18px] h-[18px] rounded-full bg-white border-[3px] border-[#fdc700] shadow-sm pointer-events-none" />
+        {/* User max thumb (dark border, draggable) */}
+        <div
+          className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-[22px] h-[22px] rounded-full bg-white border-[3px] border-[#0c0c0f] shadow-md pointer-events-none z-10"
+          style={{ left: `${valuePct}%` }}
+        />
+      </div>
+      {/* Labels */}
+      <div className="relative mt-2.5 h-5 text-[11px] font-['DM_Sans'] text-[#888896]">
+        <span className="absolute left-0">£{startPrice}</span>
+        <span className="absolute right-0">£{buyNowPrice}</span>
+      </div>
+    </div>
+  );
+}
 // ─── SellerView ───────────────────────────────────────────────────────────────
 function SellerView({
   auction,
   dispatch,
   onPublish,
+  role,
+  onRoleChange,
 }: {
   auction: AuctionState;
   dispatch: React.Dispatch<Action>;
   onPublish: () => void;
+  role: "seller" | "buyer";
+  onRoleChange: (r: "seller" | "buyer") => void;
 }) {
-  const [startStr, setStartStr] = useState(String(auction.startPrice));
-  const [reserveStr, setReserveStr] = useState(String(auction.reservePrice));
-  const [buyNowStr, setBuyNowStr] = useState(String(auction.buyNowPrice));
+  const [startStr, setStartStr] = useState("");
+  const [buyNowStr, setBuyNowStr] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [toast, setToast] = useState("");
 
   const start = parseInt(startStr) || 0;
-  const reserve = parseInt(reserveStr) || 0;
   const buyNow = parseInt(buyNowStr) || 0;
 
   function validate() {
     const errs: Record<string, string> = {};
     if (!startStr || start <= 0) errs.start = "Must be a positive whole-pound value";
-    if (!reserveStr || reserve <= 0) errs.reserve = "Must be a positive whole-pound value";
     if (!buyNowStr || buyNow <= 0) errs.buyNow = "Must be a positive whole-pound value";
-    if (start > 0 && reserve > 0 && start > reserve)
-      errs.start = "Starting bid must be ≤ reserve price";
-    if (reserve > 0 && buyNow > 0 && reserve >= buyNow)
-      errs.reserve = "Reserve must be less than Buy Now price";
+    if (start > 0 && buyNow > 0 && start >= buyNow)
+      errs.start = "Starting bid must be less than Buy Now price";
     return errs;
   }
 
@@ -503,7 +549,7 @@ function SellerView({
     const errs = validate();
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
-    dispatch({ type: "PUBLISH", start, reserve, buyNow });
+    dispatch({ type: "PUBLISH", start, buyNow });
     setToast("Auction published! Redirecting to market…");
     setTimeout(() => {
       setToast("");
@@ -513,7 +559,7 @@ function SellerView({
 
   return (
     <div className="min-h-screen bg-[#f3f4f6]">
-      <FleekNav />
+      <FleekNav role={role} onRoleChange={onRoleChange} />
       {toast && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-[#0c0c0f] text-white text-[13px] font-['DM_Sans'] px-5 py-3 rounded-xl shadow-xl">
           {toast}
@@ -629,13 +675,6 @@ function SellerView({
 
               <div className="space-y-4">
                 <PriceInput
-                  label="Reserve price"
-                  value={reserveStr}
-                  onChange={setReserveStr}
-                  badge="private"
-                  error={errors.reserve}
-                />
-                <PriceInput
                   label="Starting bid"
                   value={startStr}
                   onChange={setStartStr}
@@ -674,8 +713,7 @@ function SellerView({
               <div className="mt-5">
                 <PriceRangeBar
                   startPrice={start}
-                  reservePrice={reserve}
-                  buyNowPrice={buyNow > 0 ? buyNow : 760}
+                  buyNowPrice={buyNow > 0 ? buyNow : 0}
                 />
               </div>
 
@@ -753,7 +791,7 @@ function MarketAuctionCard({
         </div>
         <div className="flex items-center gap-2 mb-3 flex-wrap">
           <StatusBadge status={auction.status} />
-          {auction.status !== "draft" && <ReserveBadge met={auction.reserveMet} />}
+          {/* status only */}
         </div>
         <div className="flex items-center justify-between">
           <div>
@@ -782,24 +820,34 @@ function StaticDemoCard({
   type,
   currentBid,
   buyNow,
-  reserveMet,
-  color,
-  shape,
+  imageUrl,
+  piecesLabel,
+  supplier,
+  endsIn = "2h",
 }: {
   title: string;
   type: string;
   currentBid: number;
   buyNow: number;
-  reserveMet: boolean;
-  color: string;
-  shape: string;
+  imageUrl: string;
+  piecesLabel: string;
+  supplier: string;
+  endsIn?: string;
 }) {
   return (
-    <div className="bg-white rounded-[16px] border border-[#e5e7eb] shadow-sm overflow-hidden opacity-75">
-      <div className={`h-[180px] flex items-center justify-center ${color}`}>
-        <span className="text-7xl">{shape}</span>
+    <div className="bg-white rounded-[16px] border border-[#e5e7eb] shadow-sm overflow-hidden">
+      <div className="h-[180px] bg-[#f5f5f0] overflow-hidden">
+        <img
+          src={imageUrl}
+          alt={title}
+          className="w-full h-full object-cover"
+          onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+        />
       </div>
       <div className="p-5">
+        <p className="text-[10px] font-extrabold font-['Manrope'] text-[#77776f] tracking-[0.5px] mb-1">
+          {piecesLabel}
+        </p>
         <h3
           className="text-[15px] font-extrabold tracking-[-0.3px] text-[#151515] leading-snug mb-1"
           style={{ fontFamily: "'Manrope', sans-serif" }}
@@ -823,12 +871,11 @@ function StaticDemoCard({
             <span className="w-1.5 h-1.5 rounded-full bg-[#15803d]" />
             LIVE AUCTION
           </span>
-          <ReserveBadge met={reserveMet} />
         </div>
         <p className="text-[12px] font-['Manrope'] text-[#6d6c67]">
-          Buy Now £{buyNow} · Ends in 2h
+          Buy Now £{buyNow} · Ends in {endsIn}
         </p>
-        <p className="text-[10px] font-['Manrope'] text-[#99a1af] mt-0.5">Demo listing</p>
+        <p className="text-[10px] font-['Manrope'] text-[#99a1af] mt-0.5">{supplier}</p>
       </div>
     </div>
   );
@@ -837,32 +884,53 @@ function StaticDemoCard({
 function MarketView({
   auction,
   onView,
+  onCreateAuction,
+  role,
+  onRoleChange,
 }: {
   auction: AuctionState;
   onView: () => void;
+  onCreateAuction: () => void;
+  role: "seller" | "buyer";
+  onRoleChange: (r: "seller" | "buyer") => void;
 }) {
   const [activeFilter, setActiveFilter] = useState("All auctions");
-  const filters = ["All auctions", "Exact bundles", "Ending soon", "Reserve met"];
+  const filters = ["All auctions", "Exact bundles", "Ending soon"];
 
   return (
     <div className="min-h-screen bg-[#f3f4f6]">
-      <FleekNav />
+      <FleekNav role={role} onRoleChange={onRoleChange} />
       <div className="max-w-[1280px] mx-auto px-6 py-8">
-        <p className="text-[12px] font-extrabold font-['Manrope'] text-[#74736e] tracking-[1.1px] mb-1">
-          ALWAYS-ON MARKET
-        </p>
-        <h1
-          className="text-[34px] font-extrabold tracking-[-1.8px] text-[#151515] leading-tight"
-          style={{ fontFamily: "'Manrope', sans-serif" }}
-        >
-          Auction House
-        </h1>
-        <p className="text-[15px] font-['Manrope'] text-[#6d6c67] mt-1 mb-6">
-          Bid and wait, or buy now.
-        </p>
+        <div className="flex items-start justify-between mb-6">
+          <div>
+            <p className="text-[12px] font-extrabold font-['Manrope'] text-[#74736e] tracking-[1.1px] mb-1">
+              ALWAYS-ON MARKET
+            </p>
+            <h1
+              className="text-[34px] font-extrabold tracking-[-1.8px] text-[#151515] leading-tight"
+              style={{ fontFamily: "'Manrope', sans-serif" }}
+            >
+              Auction House
+            </h1>
+            <p className="text-[15px] font-['Manrope'] text-[#6d6c67] mt-1">
+              {role === "seller" ? "Manage and list your wholesale inventory." : "Bid and wait, or buy now."}
+            </p>
+          </div>
+          {role === "seller" && (
+            <button
+              onClick={onCreateAuction}
+              className="shrink-0 flex items-center gap-2 bg-[#fdc700] text-[#0c0c0f] text-[14px] font-semibold font-['DM_Sans'] px-5 py-2.5 rounded-[12px] hover:bg-[#e6b300] transition-colors active:scale-[0.98] shadow-sm mt-2"
+            >
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden>
+                <path d="M7.5 2.5v10M2.5 7.5h10" stroke="#0c0c0f" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+              Create auction
+            </button>
+          )}
+        </div>
 
         {/* Filters */}
-        <div className="flex items-center gap-2 mb-8 flex-wrap">
+        <div className="flex items-center gap-2 mb-8 mt-4 flex-wrap">
           {filters.map((f) => (
             <button
               key={f}
@@ -880,24 +948,28 @@ function MarketView({
 
         {/* Cards grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          <MarketAuctionCard auction={auction} onView={onView} />
+          {auction.status !== "draft" && (
+            <MarketAuctionCard auction={auction} onView={onView} />
+          )}
           <StaticDemoCard
-            title="24-piece Grade A Levi's 501 Lot"
-            type="Exact bundle · Grade A · 24 pcs"
-            currentBid={480}
-            buyNow={640}
-            reserveMet={true}
-            color="bg-[#dbeafe]"
-            shape="👖"
+            title="Lacoste Collar T-Shirts"
+            type="Exact bundle · Grade AB · 10 pcs · S–XXL"
+            currentBid={95}
+            buyNow={135}
+            imageUrl="https://d2io9vrujy7b7u.cloudfront.net/fit-in/450x450/filters:strip_exif()/9386758177006/f2f1ba55-a7af-4c5f-9ce4-d415d365c7ef/rn_image_picker_lib_temp_d85dce37-54e3-4478-854a-1005b89fea55.jpg"
+            piecesLabel="LACOSTE · MENSWEAR · GRADE AB"
+            supplier="House of Wears"
+            endsIn="1h 45m"
           />
           <StaticDemoCard
-            title="30-piece Y2K Tops Bundle"
-            type="Representative · Grade AB · 30 pcs"
-            currentBid={310}
-            buyNow={450}
-            reserveMet={false}
-            color="bg-[#fce7f3]"
-            shape="👕"
+            title="Lacoste T-Shirts"
+            type="Representative · Grade AB · 20 pcs · S–XXL"
+            currentBid={160}
+            buyNow={220}
+            imageUrl="https://images.unsplash.com/photo-1560454324-5d6b93fcde0a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=600"
+            piecesLabel="LACOSTE · MENSWEAR · GRADE AB"
+            supplier="Trendy Treasures"
+            endsIn="3h 20m"
           />
         </div>
       </div>
@@ -909,9 +981,13 @@ function MarketView({
 function BuyerView({
   auction,
   dispatch,
+  role,
+  onRoleChange,
 }: {
   auction: AuctionState;
   dispatch: React.Dispatch<Action>;
+  role: "seller" | "buyer";
+  onRoleChange: (r: "seller" | "buyer") => void;
 }) {
   const [buyerTab, setBuyerTab] = useState<BuyerTab>("buy-now");
   const [activityTab, setActivityTab] = useState<ActivityTab>("public");
@@ -957,7 +1033,7 @@ function BuyerView({
 
   return (
     <div className="min-h-screen bg-[#f3f4f6]">
-      <FleekNav />
+      <FleekNav role={role} onRoleChange={onRoleChange} />
       {toast && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-[#0c0c0f] text-white text-[13px] font-['DM_Sans'] px-5 py-3 rounded-xl shadow-xl max-w-sm text-center">
           {toast}
@@ -1100,9 +1176,8 @@ function BuyerView({
                 )}
               </div>
 
-              {/* Reserve + bid count */}
+              {/* Bid count */}
               <div className="flex items-center gap-2 flex-wrap">
-                <ReserveBadge met={auction.reserveMet} />
                 <span className="text-[12px] font-['Manrope'] text-[#6d6c67]">
                   {auction.bidCount} bids
                 </span>
@@ -1230,23 +1305,15 @@ function BuyerView({
                         className="w-full h-[48px] rounded-[18px] border border-[#d7d6d0] pl-7 pr-3 text-[16px] font-extrabold font-['Manrope'] text-[#151515] bg-white outline-none focus:border-[#fdc700] transition-colors disabled:opacity-50"
                       />
                     </div>
-                    {/* Slider */}
+                    {/* Slider — matches seller price range bar */}
                     <div className="mt-3">
-                      <input
-                        type="range"
-                        min={auction.startPrice}
-                        max={auction.buyNowPrice - 10}
-                        step={10}
+                      <BidSlider
+                        startPrice={auction.startPrice}
+                        buyNowPrice={auction.buyNowPrice}
                         value={parseInt(maxStr) || auction.startPrice}
-                        onChange={(e) => setMaxStr(e.target.value)}
+                        onChange={(v) => setMaxStr(String(v))}
                         disabled={isClosed}
-                        className="w-full accent-[#fdc700] disabled:opacity-50"
                       />
-                      <div className="flex justify-between text-[11px] font-['DM_Sans'] text-[#99a1af] mt-0.5">
-                        <span>£{auction.startPrice}</span>
-                        <span>£{Math.round((auction.startPrice + auction.buyNowPrice) / 2)}</span>
-                        <span>£{auction.buyNowPrice}</span>
-                      </div>
                     </div>
                   </div>
 
@@ -1447,12 +1514,7 @@ function DemoControls({
                   {auction.rivalMaximum ? `£${auction.rivalMaximum}` : "—"}
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-[#6d6c67]">Reserve met</span>
-                <span className={`font-bold ${auction.reserveMet ? "text-[#15803d]" : "text-[#92400e]"}`}>
-                  {auction.reserveMet ? "Yes" : "No"}
-                </span>
-              </div>
+
             </div>
 
             {/* View switcher */}
@@ -1548,7 +1610,8 @@ function DemoControls({
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [auction, dispatch] = useReducer(reducer, INITIAL_STATE);
-  const [view, setView] = useState<View>("seller");
+  const [view, setView] = useState<View>("market");
+  const [role, setRole] = useState<"seller" | "buyer">("seller");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Countdown timer
@@ -1569,6 +1632,7 @@ export default function App() {
   }, [auction.status]);
 
   function handlePublish() {
+    setRole("buyer");
     setView("market");
   }
 
@@ -1576,16 +1640,42 @@ export default function App() {
     setView("buyer");
   }
 
+  function handleCreateAuction() {
+    setView("seller");
+  }
+
+  function handleRoleChange(r: "seller" | "buyer") {
+    setRole(r);
+    if (view === "buyer") setView("market");
+  }
+
   return (
     <div className="min-h-screen">
       {view === "seller" && (
-        <SellerView auction={auction} dispatch={dispatch} onPublish={handlePublish} />
+        <SellerView
+          auction={auction}
+          dispatch={dispatch}
+          onPublish={handlePublish}
+          role={role}
+          onRoleChange={handleRoleChange}
+        />
       )}
       {view === "market" && (
-        <MarketView auction={auction} onView={handleViewAuction} />
+        <MarketView
+          auction={auction}
+          onView={handleViewAuction}
+          onCreateAuction={handleCreateAuction}
+          role={role}
+          onRoleChange={handleRoleChange}
+        />
       )}
       {view === "buyer" && (
-        <BuyerView auction={auction} dispatch={dispatch} />
+        <BuyerView
+          auction={auction}
+          dispatch={dispatch}
+          role={role}
+          onRoleChange={handleRoleChange}
+        />
       )}
       <DemoControls
         auction={auction}
